@@ -1,0 +1,10 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+.vite
+
+# Never commit an API key — the app stores it in the browser, not the repo.
+.env
+.env.*
