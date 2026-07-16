@@ -25,9 +25,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
 
-      - run: npm ci
+      # `npm install` (not `npm ci`) — this repo has no committed package-lock.json.
+      - run: npm install
 
       # Build with base="/<repo>/" so asset URLs resolve on the project-site path.
       - run: npm run build -- --base="/${{ github.event.repository.name }}/"
