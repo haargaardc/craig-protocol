@@ -78,9 +78,9 @@ npm run preview
 
 ## Notes
 
-- **Model** — the app uses `claude-opus-4-8`. Change `MODEL` in
-  [`src/App.jsx`](src/App.jsx) to use a different model (e.g. `claude-sonnet-5`
-  for lower cost).
+- **Model** — the app uses `claude-sonnet-5`, a good cost/quality balance for
+  meal estimation and coaching. Change `MODEL` in [`src/App.jsx`](src/App.jsx)
+  to use a different one (e.g. `claude-opus-4-8` for the most capable).
 - **Your key, your bill** — calls are billed to your Anthropic account. The key
   lives only on the device; clear it any time with **Remove key**.
 - **Backups** — use **Plan → Backup & Restore** to export/import all data as JSON

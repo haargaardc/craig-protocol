@@ -218,7 +218,7 @@ const compressImage = (file, maxW = 520, quality = 0.7) =>
 
 // Call the Anthropic Messages API directly from the browser using the user's
 // own key. Requires the dangerous-direct-browser-access header (opt-in CORS).
-const MODEL = "claude-opus-4-8";
+const MODEL = "claude-sonnet-5";
 const callClaude = async (messages) => {
   const key = getApiKey();
   if (!key) {
