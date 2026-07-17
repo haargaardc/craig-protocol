@@ -260,6 +260,19 @@ const callClaude = async (messages, maxTokens = 1000) => {
   return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
 };
 
+// Models sometimes wrap JSON in prose or fences. Salvage the object; a parse
+// failure here usually means the reply was cut off by max_tokens.
+const parseJson = (raw) => {
+  const cleaned = (raw || "").replace(/```json|```/g, "").trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const s = cleaned.indexOf("{"), e = cleaned.lastIndexOf("}");
+    if (s !== -1 && e > s) return JSON.parse(cleaned.slice(s, e + 1));
+    throw new Error("the reply wasn't valid JSON (it may have been cut off)");
+  }
+};
+
 // Show the actionable message for API/connection failures, otherwise a fallback.
 const aiErrorMessage = (e, fallback) =>
   e && (e.code === "NO_KEY" || /API key|Anthropic API|Network error|Rate limited/.test(e.message || ""))
@@ -578,8 +591,8 @@ export default function App() {
       const text = await callClaude([{
         role: "user",
         content: `Here is the transcribed text of a blood test / lab report, possibly spanning several pages:\n\n${draft}\n\nRespond ONLY valid JSON, no markdown: {"date": "YYYY-MM-DD or null if not visible", "markers": [{"name": "marker name", "value": "number as shown", "unit": "unit", "flag": "low"|"normal"|"high"|"unknown"}], "summary": "2-3 plain-language sentences about what stands out and anything relevant for training or nutrition. No diagnosis. End with a note to discuss with their doctor if anything is flagged."} Use the reference ranges in the text to set each flag. Merge duplicates across pages. Include every marker, up to 40.`,
-      }]);
-      const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+      }], 8000); // ~40 markers of JSON is far past the 1000-token default
+      const parsed = parseJson(text);
       const report = {
         id: Date.now(),
         date: parsed.date || t,
@@ -593,7 +606,7 @@ export default function App() {
       setHealthMsg(`Blood work saved — ${report.markers.length} markers ✓`);
     } catch (e) {
       console.error(e);
-      setHealthMsg(aiErrorMessage(e, "Couldn't turn that text into a report — check the text and try again."));
+      setHealthMsg(aiErrorMessage(e, `Couldn't build the report: ${e?.message || "unknown error"}`));
     } finally {
       setBloodSaving(false);
     }
