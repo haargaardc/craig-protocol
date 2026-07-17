@@ -310,6 +310,7 @@ export default function App() {
   const [bloodSaving, setBloodSaving] = useState(false);
   const [bloodIdx, setBloodIdx] = useState(null); // null = show newest report
   const [showAllMarkers, setShowAllMarkers] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(null); // report id awaiting a 2nd tap
   const [healthMsg, setHealthMsg] = useState(null);
   const touchRef = useRef(null);
 
@@ -579,6 +580,14 @@ export default function App() {
       setBloodScanning(false);
       if (bloodRef.current) bloodRef.current.value = "";
     }
+  };
+
+  const deleteBloodReport = (id) => {
+    save({ ...state, blood: state.blood.filter((r) => r.id !== id) });
+    setBloodIdx(null); // fall back to the newest remaining report
+    setShowAllMarkers(false);
+    setConfirmDelete(null);
+    setHealthMsg("Report deleted ✓");
   };
 
   // Step 2 — turn the reviewed text into structured markers. Text-only call,
@@ -1179,7 +1188,7 @@ export default function App() {
                   {state.blood.length > 1 && (
                     <div className="flex gap-2 overflow-x-auto pb-2 mb-1">
                       {state.blood.map((r, i) => (
-                        <button key={r.id} onClick={() => { setBloodIdx(i); setShowAllMarkers(false); }}
+                        <button key={r.id} onClick={() => { setBloodIdx(i); setShowAllMarkers(false); setConfirmDelete(null); }}
                           className="px-3 py-1.5 rounded-full text-xs whitespace-nowrap"
                           style={{
                             background: i === idx ? C.sand : "transparent",
@@ -1193,8 +1202,19 @@ export default function App() {
                     </div>
                   )}
 
-                  <div className="text-xs mb-2" style={{ color: C.mist }}>
-                    {isLatest ? "Latest" : "Viewing"}: {b.date} · {b.markers.length} markers{b.pages > 1 ? ` · ${b.pages} pages` : ""}
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <div className="text-xs" style={{ color: C.mist }}>
+                      {isLatest ? "Latest" : "Viewing"}: {b.date} · {b.markers.length} markers{b.pages > 1 ? ` · ${b.pages} pages` : ""}
+                    </div>
+                    {confirmDelete === b.id ? (
+                      <button onClick={() => deleteBloodReport(b.id)}
+                        className="text-xs px-2.5 py-1 rounded-lg whitespace-nowrap"
+                        style={{ background: C.alert, color: C.deep, fontWeight: 600 }}>Tap again to delete</button>
+                    ) : (
+                      <button onClick={() => setConfirmDelete(b.id)}
+                        className="text-xs px-2.5 py-1 rounded-lg whitespace-nowrap"
+                        style={{ color: C.mist, border: `1px solid ${C.line}` }}>Delete</button>
+                    )}
                   </div>
 
                   {flagged.length > 0 ? flagged.map((m, i) => (
