@@ -519,31 +519,47 @@ export default function App() {
     if (healthRef.current) healthRef.current.value = "";
   };
 
-  // Photograph blood work -> extract markers via Claude
-  const analyzeBlood = async (file) => {
+  // Photograph blood work -> extract markers via Claude.
+  // Accepts several images at once: lab results usually span multiple pages,
+  // and they must land in ONE report rather than one report per page.
+  const analyzeBlood = async (fileList) => {
+    const files = Array.from(fileList).slice(0, 8); // 8 pages is plenty; keeps the request sane
+    if (!files.length) return;
     setBloodLoading(true); setHealthMsg(null);
     try {
-      const base64 = await new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = () => res(r.result.split(",")[1]);
-        r.onerror = () => rej(new Error("read failed"));
-        r.readAsDataURL(file);
-      });
-      const media = file.type === "image/png" ? "image/png" : "image/jpeg";
+      // Resize to ~1568px: small enough for the API's per-image limits, still
+      // sharp enough to read a results table. Always re-encoded as JPEG.
+      const images = [];
+      for (const f of files) {
+        const dataUrl = await compressImage(f, 1568, 0.85);
+        images.push({
+          type: "image",
+          source: { type: "base64", media_type: "image/jpeg", data: dataUrl.split(",")[1] },
+        });
+      }
+      const multi = files.length > 1
+        ? `There are ${files.length} images. They are pages or parts of the SAME lab report — read every image and merge all markers into one combined list, removing duplicates. `
+        : "";
       const text = await callClaude([{
         role: "user",
         content: [
-          { type: "image", source: { type: "base64", media_type: media, data: base64 } },
-          { type: "text", text: `Read this blood test / lab result image. Respond ONLY valid JSON, no markdown: {"date": "YYYY-MM-DD or null if not visible", "markers": [{"name": "marker name", "value": "number as shown", "unit": "unit", "flag": "low"|"normal"|"high"|"unknown"}], "summary": "2-3 plain-language sentences about what stands out and anything relevant for training or nutrition. No diagnosis. End with a note to discuss with their doctor if anything is flagged."} Max 15 most relevant markers.` },
+          ...images,
+          { type: "text", text: `Read this blood test / lab result. ${multi}Respond ONLY valid JSON, no markdown: {"date": "YYYY-MM-DD or null if not visible", "markers": [{"name": "marker name", "value": "number as shown", "unit": "unit", "flag": "low"|"normal"|"high"|"unknown"}], "summary": "2-3 plain-language sentences about what stands out and anything relevant for training or nutrition. No diagnosis. End with a note to discuss with their doctor if anything is flagged."} Include every marker you can read, up to 40.` },
         ],
       }]);
       const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
-      const report = { id: Date.now(), date: parsed.date || t, markers: parsed.markers || [], summary: parsed.summary || "" };
+      const report = {
+        id: Date.now(),
+        date: parsed.date || t,
+        markers: parsed.markers || [],
+        summary: parsed.summary || "",
+        pages: files.length,
+      };
       await save({ ...state, blood: [...state.blood, report].slice(-5) });
-      setHealthMsg("Blood work added ✓");
+      setHealthMsg(`Blood work added — ${report.markers.length} markers from ${files.length} image${files.length > 1 ? "s" : ""} ✓`);
     } catch (e) {
       console.error(e);
-      setHealthMsg(aiErrorMessage(e, "Couldn't read that image — try a sharper photo of the results table."));
+      setHealthMsg(aiErrorMessage(e, "Couldn't read those images — try sharper photos of the results table."));
     } finally {
       setBloodLoading(false);
       if (bloodRef.current) bloodRef.current.value = "";
@@ -1073,7 +1089,10 @@ export default function App() {
               const flagged = b.markers.filter((m) => m.flag === "low" || m.flag === "high");
               return (
                 <div className="mb-3">
-                  <div className="text-xs mb-2" style={{ color: C.mist }}>Latest: {b.date}</div>
+                  <div className="text-xs mb-2" style={{ color: C.mist }}>
+                    Latest: {b.date} · {b.markers.length} markers{b.pages > 1 ? ` · ${b.pages} pages` : ""}
+                    {state.blood.length > 1 ? ` · ${state.blood.length} reports kept` : ""}
+                  </div>
                   {flagged.length > 0 ? flagged.map((m, i) => (
                     <div key={i} className="flex justify-between text-sm py-1.5" style={{ borderTop: `1px solid ${C.line}` }}>
                       <span>{m.name}</span>
@@ -1090,13 +1109,16 @@ export default function App() {
                 </div>
               );
             })()}
-            <input ref={bloodRef} type="file" accept="image/*" className="hidden"
-                   onChange={(e) => e.target.files?.[0] && analyzeBlood(e.target.files[0])} />
+            <input ref={bloodRef} type="file" accept="image/*" multiple className="hidden"
+                   onChange={(e) => e.target.files?.length && analyzeBlood(e.target.files)} />
             <button onClick={() => bloodRef.current?.click()} disabled={bloodLoading}
               className="w-full py-3 rounded-xl text-sm font-semibold"
               style={{ border: `1px solid ${C.sand}`, color: bloodLoading ? C.mist : C.sand }}>
-              {bloodLoading ? "Reading results…" : "📷 Photograph blood test results"}
+              {bloodLoading ? "Reading results…" : "📷 Add blood test photos"}
             </button>
+            <p className="text-[11px] mt-2 leading-relaxed" style={{ color: C.mist }}>
+              Multi-page results? Select <span style={{ color: C.sand }}>all the pages at once</span> (up to 8) — they're read together into one report.
+            </p>
             <p className="text-[11px] mt-2 leading-relaxed" style={{ color: C.mist }}>Informational only — not medical advice. Always discuss results with your doctor.</p>
           </section>
 
