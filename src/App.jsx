@@ -227,7 +227,7 @@ const compressImage = (file, maxW = 520, quality = 0.7) =>
 // Call the Anthropic Messages API directly from the browser using the user's
 // own key. Requires the dangerous-direct-browser-access header (opt-in CORS).
 const MODEL = "claude-sonnet-5";
-const callClaude = async (messages) => {
+const callClaude = async (messages, maxTokens = 1000) => {
   const key = getApiKey();
   if (!key) {
     const err = new Error("Add your Anthropic API key in Plan → AI Connection to use the AI features.");
@@ -244,7 +244,7 @@ const callClaude = async (messages) => {
         "anthropic-version": "2023-06-01",
         "anthropic-dangerous-direct-browser-access": "true",
       },
-      body: JSON.stringify({ model: MODEL, max_tokens: 1000, messages }),
+      body: JSON.stringify({ model: MODEL, max_tokens: maxTokens, messages }),
     });
   } catch {
     throw new Error("Network error reaching Anthropic — check your connection.");
@@ -542,16 +542,16 @@ export default function App() {
           role: "user",
           content: [
             { type: "image", source: { type: "base64", media_type: "image/jpeg", data: dataUrl.split(",")[1] } },
-            { type: "text", text: `Transcribe this blood test / lab result page as plain text. One marker per line, exactly as printed: name, value, unit, and the reference range if shown — e.g. "Hemoglobin: 9.2 mmol/L (ref 8.3-10.5)". Include the sample date if it is visible. Transcribe only: do not interpret, summarise, or add any commentary. If this image contains no lab results, reply with exactly: NO_RESULTS_FOUND` },
+            { type: "text", text: `Transcribe this blood test / lab result page as plain text. One marker per line, exactly as printed: name, value, unit, and the reference range if shown — e.g. "Hemoglobin: 9.2 mmol/L (ref 8.3-10.5)". Include the sample date if it is visible. Transcribe only: do not interpret, summarise, or add any commentary. Transcribe whatever text you can make out, even if the image is imperfect. Only if the image contains no readable text at all, reply with exactly: NO_RESULTS_FOUND` },
           ],
-        }]);
+        }], 4000); // a dense lab page far exceeds the 1000-token default
         const clean = (text || "").trim();
         if (!clean || clean === "NO_RESULTS_FOUND") continue;
         draft += `${draft ? "\n\n" : ""}--- Page ${draftPageCount(draft) + 1} ---\n${clean}`;
         added++;
       }
       if (!added) {
-        setHealthMsg("No lab results found in that image — try a sharper, straighter photo of the results table.");
+        setHealthMsg("Claude found no readable text in that image. You can type or paste the values into the box instead.");
       } else {
         await save({ ...state, bloodDraft: draft });
         setHealthMsg(`Read ${added} page${added > 1 ? "s" : ""} — check the text below, then save ✓`);
@@ -560,7 +560,8 @@ export default function App() {
       console.error(e);
       // Keep whatever pages did scan before the failure.
       if (added) await save({ ...state, bloodDraft: draft });
-      setHealthMsg(aiErrorMessage(e, "Couldn't read that page — try a sharper photo."));
+      // Report the real reason — don't blame the photo for a technical failure.
+      setHealthMsg(aiErrorMessage(e, `Scan failed: ${e?.message || "unknown error"}`));
     } finally {
       setBloodScanning(false);
       if (bloodRef.current) bloodRef.current.value = "";
@@ -1254,21 +1255,16 @@ export default function App() {
                     <div className="text-[10px] tracking-[0.2em] mb-2" style={{ color: C.sand }}>
                       SCANNED TEXT{pages ? ` · ${pages} PAGE${pages > 1 ? "S" : ""}` : ""}
                     </div>
-                    {state.bloodDraft ? (
-                      <>
-                        <textarea value={state.bloodDraft} rows={9}
-                          onChange={(e) => save({ ...state, bloodDraft: e.target.value })}
-                          className="w-full px-3 py-2 rounded-xl text-xs outline-none resize-y"
-                          style={{ background: C.deep, border: `1px solid ${C.line}`, color: C.foam, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", lineHeight: 1.6 }} />
-                        <p className="text-[11px] mt-1.5 mb-2 leading-relaxed" style={{ color: C.mist }}>
-                          Check the numbers against your printout — you can edit them here. Add more pages, then save.
-                        </p>
-                      </>
-                    ) : (
-                      <p className="text-xs mb-3 leading-relaxed" style={{ color: C.mist }}>
-                        Photograph your results one page at a time. Each page's text appears here so you can check it before anything is saved.
-                      </p>
-                    )}
+                    <textarea value={state.bloodDraft} rows={state.bloodDraft ? 9 : 4}
+                      onChange={(e) => save({ ...state, bloodDraft: e.target.value })}
+                      placeholder={"Scan a page below — or just type the values yourself, one per line:\nHemoglobin: 9.2 mmol/L (ref 8.3-10.5)\nLDL: 4.1 mmol/L (ref <3.0)"}
+                      className="w-full px-3 py-2 rounded-xl text-xs outline-none resize-y"
+                      style={{ background: C.deep, border: `1px solid ${C.line}`, color: C.foam, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", lineHeight: 1.6 }} />
+                    <p className="text-[11px] mt-1.5 mb-2 leading-relaxed" style={{ color: C.mist }}>
+                      {state.bloodDraft
+                        ? "Check the numbers against your printout — you can edit them here. Add more pages, then save."
+                        : "Photograph your results a page at a time, or type them in directly. Nothing is saved until you tap Save."}
+                    </p>
                   </>
                 );
               })()}
