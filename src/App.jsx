@@ -293,6 +293,8 @@ export default function App() {
   const bloodRef = useRef(null);
   const chatEndRef = useRef(null);
   const [bloodLoading, setBloodLoading] = useState(false);
+  const [bloodIdx, setBloodIdx] = useState(null); // null = show newest report
+  const [showAllMarkers, setShowAllMarkers] = useState(false);
   const [healthMsg, setHealthMsg] = useState(null);
   const touchRef = useRef(null);
 
@@ -556,6 +558,8 @@ export default function App() {
         pages: files.length,
       };
       await save({ ...state, blood: [...state.blood, report].slice(-5) });
+      setBloodIdx(null); // snap the viewer back to the newest report
+      setShowAllMarkers(false);
       setHealthMsg(`Blood work added — ${report.markers.length} markers from ${files.length} image${files.length > 1 ? "s" : ""} ✓`);
     } catch (e) {
       console.error(e);
@@ -614,6 +618,29 @@ export default function App() {
   };
 
   const profileContext = () => (state.targets.age ? ` User age: ${state.targets.age}.` : "");
+
+  // Lab values arrive as strings ("5,4", "<0.1", "12.3") — pull out a number if we can.
+  const numOf = (v) => {
+    const n = parseFloat(String(v ?? "").replace(",", ".").replace(/[^0-9.\-]/g, ""));
+    return isNaN(n) ? null : n;
+  };
+
+  // Markers measured in 2+ reports, oldest -> newest, so we can trend them.
+  const bloodTrends = () => {
+    const byName = {};
+    [...state.blood]
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .forEach((rep) => {
+        (rep.markers || []).forEach((m) => {
+          const key = (m.name || "").trim().toLowerCase();
+          const val = numOf(m.value);
+          if (!key || val == null) return;
+          byName[key] = byName[key] || { name: m.name, unit: m.unit || "", points: [] };
+          byName[key].points.push({ date: rep.date, value: val, flag: m.flag });
+        });
+      });
+    return Object.values(byName).filter((x) => x.points.length >= 2);
+  };
 
   const EURO_GROUNDING = `When giving a health or nutrition reason, ground it in established European reference data - primarily the Nordic Nutrition Recommendations 2023 (NNR2023), EFSA dietary reference values, or ESC/EAS guidelines for blood lipids - and briefly name the source when you make such a claim (e.g. "NNR2023 recommends keeping added sugar under 10% of energy"). Only make claims consistent with these references. If blood markers are flagged, connect food or training choices to them where genuinely relevant. Never diagnose.`;
 
@@ -680,6 +707,21 @@ export default function App() {
       <div className="h-full rounded-full transition-all duration-700" style={{ width: `${Math.min(100, (value / max) * 100)}%`, background: color }} />
     </div>
   );
+
+  // Tiny trend line for a marker's history. Needs 2+ points (callers filter).
+  const Spark = ({ points, color, w = 62, h = 20 }) => {
+    const vals = points.map((p) => p.value);
+    const min = Math.min(...vals), max = Math.max(...vals);
+    const span = max - min || 1; // flat series -> draw a centred line
+    const y = (v) => (max === min ? h / 2 : h - ((v - min) / span) * h);
+    const pts = points.map((p, i) => `${(i / (points.length - 1)) * w},${y(p.value)}`).join(" ");
+    return (
+      <svg width={w} height={h} style={{ display: "block" }}>
+        <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        <circle cx={w} cy={y(vals[vals.length - 1])} r="2.5" fill={color} />
+      </svg>
+    );
+  };
 
   const TabBtn = ({ id, label }) => (
     <button onClick={() => setTab(id)}
@@ -1085,20 +1127,53 @@ export default function App() {
           <section className="rounded-2xl p-5" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
             <h3 className="text-xl mb-2" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700 }}>BLOOD WORK</h3>
             {state.blood.length > 0 && (() => {
-              const b = state.blood[state.blood.length - 1];
+              const idx = Math.min(bloodIdx ?? state.blood.length - 1, state.blood.length - 1);
+              const b = state.blood[idx];
               const flagged = b.markers.filter((m) => m.flag === "low" || m.flag === "high");
+              const isLatest = idx === state.blood.length - 1;
               return (
                 <div className="mb-3">
+                  {/* Pick which report to view (newest first) */}
+                  {state.blood.length > 1 && (
+                    <div className="flex gap-2 overflow-x-auto pb-2 mb-1">
+                      {state.blood.map((r, i) => (
+                        <button key={r.id} onClick={() => { setBloodIdx(i); setShowAllMarkers(false); }}
+                          className="px-3 py-1.5 rounded-full text-xs whitespace-nowrap"
+                          style={{
+                            background: i === idx ? C.sand : "transparent",
+                            color: i === idx ? C.deep : C.mist,
+                            border: `1px solid ${i === idx ? C.sand : C.line}`,
+                            fontWeight: 600,
+                          }}>
+                          {fmtDay(r.date)}{i === state.blood.length - 1 ? " ·  latest" : ""}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
                   <div className="text-xs mb-2" style={{ color: C.mist }}>
-                    Latest: {b.date} · {b.markers.length} markers{b.pages > 1 ? ` · ${b.pages} pages` : ""}
-                    {state.blood.length > 1 ? ` · ${state.blood.length} reports kept` : ""}
+                    {isLatest ? "Latest" : "Viewing"}: {b.date} · {b.markers.length} markers{b.pages > 1 ? ` · ${b.pages} pages` : ""}
                   </div>
+
                   {flagged.length > 0 ? flagged.map((m, i) => (
                     <div key={i} className="flex justify-between text-sm py-1.5" style={{ borderTop: `1px solid ${C.line}` }}>
                       <span>{m.name}</span>
                       <span style={{ color: m.flag === "high" ? C.alert : C.sand, fontWeight: 600 }}>{m.value} {m.unit} · {m.flag.toUpperCase()}</span>
                     </div>
                   )) : <p className="text-sm" style={{ color: C.sea }}>All markers in normal range ✓</p>}
+
+                  {b.markers.length > flagged.length && (
+                    <button onClick={() => setShowAllMarkers(!showAllMarkers)} className="w-full text-xs mt-2 py-1" style={{ color: C.mist }}>
+                      {showAllMarkers ? "− Hide full results" : `+ Show all ${b.markers.length} markers`}
+                    </button>
+                  )}
+                  {showAllMarkers && b.markers.map((m, i) => (
+                    <div key={i} className="flex justify-between text-sm py-1.5" style={{ borderTop: `1px solid ${C.line}` }}>
+                      <span style={{ color: C.mist }}>{m.name}</span>
+                      <span style={{ color: m.flag === "high" ? C.alert : m.flag === "low" ? C.sand : C.foam }}>{m.value} {m.unit}</span>
+                    </div>
+                  ))}
+
                   {b.summary && (
                     <div className="mt-3 px-3 py-2.5 rounded-xl text-sm leading-relaxed"
                          style={{ background: C.deep, borderLeft: `3px solid ${C.sand}`, color: C.foam }}>
@@ -1106,6 +1181,39 @@ export default function App() {
                       {b.summary}
                     </div>
                   )}
+                </div>
+              );
+            })()}
+
+            {/* Markers measured more than once — trend over time */}
+            {(() => {
+              const trends = bloodTrends();
+              if (!trends.length) return null;
+              return (
+                <div className="mb-3 pt-3" style={{ borderTop: `1px solid ${C.line}` }}>
+                  <div className="text-[10px] tracking-[0.2em] mb-2" style={{ color: C.sea }}>OVER TIME</div>
+                  {trends.map((tr, i) => {
+                    const first = tr.points[0], last = tr.points[tr.points.length - 1];
+                    const delta = last.value - first.value;
+                    const color = last.flag === "high" ? C.alert : last.flag === "low" ? C.sand : C.sea;
+                    return (
+                      <div key={i} className="flex items-center justify-between gap-3 py-2" style={{ borderTop: i ? `1px solid ${C.line}` : "none" }}>
+                        <div className="min-w-0">
+                          <div className="text-sm truncate">{tr.name}</div>
+                          <div className="text-[11px]" style={{ color: C.mist }}>
+                            {first.value} → <span style={{ color, fontWeight: 600 }}>{last.value}</span> {tr.unit}
+                            {delta !== 0 && (
+                              <span style={{ color: C.mist }}> · {delta > 0 ? "▲" : "▼"} {Math.abs(Math.round(delta * 100) / 100)}</span>
+                            )}
+                          </div>
+                        </div>
+                        <Spark points={tr.points} color={color} />
+                      </div>
+                    );
+                  })}
+                  <p className="text-[11px] mt-2 leading-relaxed" style={{ color: C.mist }}>
+                    Shows any marker measured in two or more reports. Up or down isn't automatically good or bad — ask your doctor.
+                  </p>
                 </div>
               );
             })()}
