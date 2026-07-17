@@ -430,7 +430,7 @@ export default function App() {
           { type: "text", text: `Estimate this meal for a food log. The user is a ~80kg ex-CrossFit dad cutting body fat toward a lean athletic beach physique.${profileContext()} So far today (before this meal): ${kcal} of ${state.targets.kcal} kcal, ${protein} of ${state.targets.protein}g protein.${healthContext()}${bloodContext()}\n\n${EURO_GROUNDING}\n\nRespond with ONLY valid JSON, no markdown: {"desc": "short meal name, max 5 words", "items": ["item (portion)"], "kcal": number, "protein": number, "comment": "2-3 sentences in a warm coach voice. Observe what is on the plate relative to the goal, the day so far, the user's age and any flagged blood markers. When you give a health reason, name the European reference it comes from. Never shame or forbid; notice and nudge. Max 55 words."}` },
         ],
       }]);
-      const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+      const parsed = parseJson(text);
       const entry = {
         id: Date.now(),
         time: new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }),
@@ -708,7 +708,7 @@ export default function App() {
       let replyText = raw;
       let adjusted = null;
       try {
-        const parsed = JSON.parse(raw.replace(/```json|```/g, "").trim());
+        const parsed = parseJson(raw);
         replyText = parsed.reply || raw;
         if (parsed.workout && parsed.workout.exercises) adjusted = parsed.workout;
       } catch {}
@@ -732,7 +732,7 @@ export default function App() {
         role: "user",
         content: `Build a 15-20 min substitute workout. The user was scheduled for Day ${nextDayKey} (${DAYS[nextDayKey].name}: ${DAYS[nextDayKey].sub}) but is away from home. Available: ${desc}. User is an ex-CrossFitter, ~80kg, cutting fat.${profileContext()}${healthContext()} If recent sleep or resting HR suggests poor recovery, scale intensity down. Match the intent of the scheduled day with what's available. Respond ONLY valid JSON, no markdown: {"name": "short workout name", "format": "structure in one line", "exercises": [{"name": "...", "dose": "...", "cue": "one short coaching cue"}]} with 3-5 exercises.`,
       }]);
-      const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+      const parsed = parseJson(text);
       await save({ ...state, roadWorkout: { date: t, reason: "Substitute workout (away from home)", ...parsed } });
       setRoadOpen(false); setRoadInput("");
     } catch (e) {
