@@ -25,13 +25,20 @@ const storage = {
       return null;
     }
   },
+  // Deliberately lets errors through — callers surface them. A silent write
+  // failure looks exactly like a successful save, which is worse than a crash.
   set: async (key, value) => {
-    try {
-      localStorage.setItem(key, value);
-    } catch (e) {
-      console.error("localStorage write failed", e);
-    }
+    localStorage.setItem(key, value);
   },
+};
+
+// localStorage refuses writes in Private Browsing and when the origin is full.
+// Both arrive as exceptions here; translate them into something actionable.
+const storageErrorMessage = (e) => {
+  const s = `${e?.name || ""} ${e?.message || ""}`;
+  if (/quota|exceeded|full/i.test(s))
+    return "Out of storage space — progress photos take up the most room. Export a backup in Plan, then delete a few photos under Me.";
+  return "This browser is blocking local storage, so nothing can be saved. If you're using Private Browsing, open the app normally instead.";
 };
 
 const API_KEY_STORAGE = "craig-api-key";
@@ -274,6 +281,10 @@ export default function App() {
   const [roadLoading, setRoadLoading] = useState(false);
   const [apiKey, setApiKey] = useState(() => getApiKey());
   const [apiKeyInput, setApiKeyInput] = useState("");
+  const [storageError, setStorageError] = useState(null);
+  // Holds what's currently typed in the target fields, so a value mid-edit
+  // isn't lost when the section unmounts (e.g. swiping to another tab).
+  const [targetsDraft, setTargetsDraft] = useState({});
   const fileRef = useRef(null);
   const targetRef = useRef(null);
   const progressRef = useRef(null);
@@ -325,18 +336,30 @@ export default function App() {
 
   const save = async (next) => {
     setState(next);
-    try { await storage.set("beach-protocol-v1", JSON.stringify(next)); } catch (e) { console.error(e); }
+    try {
+      await storage.set("beach-protocol-v1", JSON.stringify(next));
+      setStorageError(null);
+    } catch (e) {
+      console.error(e);
+      setStorageError(storageErrorMessage(e));
+    }
   };
 
   const saveApiKey = () => {
     const k = apiKeyInput.trim();
     if (!k) return;
-    localStorage.setItem(API_KEY_STORAGE, k);
-    setApiKey(k);
-    setApiKeyInput("");
+    try {
+      localStorage.setItem(API_KEY_STORAGE, k);
+      setApiKey(k);
+      setApiKeyInput("");
+      setStorageError(null);
+    } catch (e) {
+      console.error(e);
+      setStorageError(storageErrorMessage(e));
+    }
   };
   const clearApiKey = () => {
-    localStorage.removeItem(API_KEY_STORAGE);
+    try { localStorage.removeItem(API_KEY_STORAGE); } catch {}
     setApiKey("");
     setApiKeyInput("");
   };
@@ -532,7 +555,8 @@ export default function App() {
       const data = await compressImage(file);
       setTargetPhoto(data);
       await storage.set("craig-photo-target", data);
-    } catch (e) { console.error(e); }
+      setStorageError(null);
+    } catch (e) { console.error(e); setStorageError(storageErrorMessage(e)); }
     if (targetRef.current) targetRef.current.value = "";
   };
 
@@ -542,7 +566,8 @@ export default function App() {
       const next = [...progressPhotos, { date: t, data }].slice(-10); // keep last 10
       setProgressPhotos(next);
       await storage.set("craig-photos-progress", JSON.stringify(next));
-    } catch (e) { console.error(e); }
+      setStorageError(null);
+    } catch (e) { console.error(e); setStorageError(storageErrorMessage(e)); }
     if (progressRef.current) progressRef.current.value = "";
   };
 
@@ -680,6 +705,14 @@ export default function App() {
         <TabBtn id="me" label="ME" />
         <TabBtn id="plan" label="PLAN" />
       </nav>
+
+      {storageError && (
+        <div className="mx-4 mb-3 px-4 py-3 rounded-xl text-sm leading-relaxed"
+             style={{ background: C.panel, border: `1px solid ${C.alert}` }}>
+          <span className="text-[10px] tracking-[0.2em] block mb-1" style={{ color: C.alert }}>NOT SAVED</span>
+          {storageError}
+        </div>
+      )}
 
       {/* ---------- TODAY ---------- */}
       {tab === "today" && (
@@ -837,6 +870,69 @@ export default function App() {
               </section>
             ))}
           </div>
+
+          {/* Multi-day overview — kcal + protein per day against target */}
+          {(() => {
+            const logged = Object.keys(state.food)
+              .filter((d) => (state.food[d] || []).length > 0)
+              .sort()
+              .slice(-14);
+            if (logged.length === 0) return null;
+            const rows = logged.map((d) => {
+              const items = state.food[d];
+              return {
+                date: d,
+                kcal: items.reduce((s, f) => s + (f.kcal || 0), 0),
+                protein: items.reduce((s, f) => s + (f.protein || 0), 0),
+              };
+            });
+            const avg = (k) => Math.round(rows.reduce((s, r) => s + r[k], 0) / rows.length);
+            const underKcal = rows.filter((r) => r.kcal <= state.targets.kcal).length;
+            const hitProtein = rows.filter((r) => r.protein >= state.targets.protein).length;
+            return (
+              <section className="rounded-2xl p-5" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
+                <h3 className="text-xl mb-1" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700 }}>
+                  LAST {rows.length} LOGGED DAY{rows.length > 1 ? "S" : ""}
+                </h3>
+                <p className="text-xs mb-4" style={{ color: C.mist }}>
+                  <span style={{ color: C.sea, fontWeight: 600 }}>{underKcal}/{rows.length}</span> under kcal target ·{" "}
+                  <span style={{ color: C.sand, fontWeight: 600 }}>{hitProtein}/{rows.length}</span> hit protein
+                </p>
+                <div className="grid grid-cols-2 gap-2 mb-4">
+                  <div className="rounded-xl px-3 py-3" style={{ background: C.deep, border: `1px solid ${C.line}` }}>
+                    <div className="text-lg" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700, color: C.sea }}>{avg("kcal")}</div>
+                    <div className="text-[10px] tracking-[0.2em]" style={{ color: C.mist }}>AVG KCAL / DAY</div>
+                  </div>
+                  <div className="rounded-xl px-3 py-3" style={{ background: C.deep, border: `1px solid ${C.line}` }}>
+                    <div className="text-lg" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700, color: C.sand }}>{avg("protein")}g</div>
+                    <div className="text-[10px] tracking-[0.2em]" style={{ color: C.mist }}>AVG PROTEIN / DAY</div>
+                  </div>
+                </div>
+                <div className="space-y-3">
+                  {[...rows].reverse().map((r) => (
+                    <div key={r.date}>
+                      <div className="flex justify-between text-xs mb-1.5">
+                        <span style={{ color: r.date === t ? C.foam : C.mist, fontWeight: r.date === t ? 600 : 400 }}>
+                          {r.date === t ? "Today" : fmtDay(r.date)}
+                        </span>
+                        <span style={{ color: C.mist }}>
+                          <span style={{ color: r.kcal > state.targets.kcal ? C.alert : C.sea, fontWeight: 600 }}>{r.kcal}</span> kcal ·{" "}
+                          <span style={{ color: r.protein >= state.targets.protein ? C.sand : C.mist, fontWeight: 600 }}>{r.protein}g</span> protein
+                        </span>
+                      </div>
+                      <div className="flex gap-1.5">
+                        <div className="flex-1"><Bar value={r.kcal} max={state.targets.kcal} color={r.kcal > state.targets.kcal ? C.alert : C.sea} /></div>
+                        <div className="flex-1"><Bar value={r.protein} max={state.targets.protein} color={C.sand} /></div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-[11px] mt-4 leading-relaxed" style={{ color: C.mist }}>
+                  Left bar = calories (turns orange over target). Right bar = protein. Only days with a logged meal appear.
+                </p>
+              </section>
+            );
+          })()}
         </main>
       )}
 
@@ -1057,10 +1153,18 @@ export default function App() {
                 { key: "protein", label: "PROTEIN G", ph: "150" },
               ].map((f) => (
                 <div key={f.key}>
-                  <input type="number" inputMode="numeric" placeholder={f.ph} defaultValue={state.targets[f.key] || ""}
-                    onBlur={(e) => {
-                      const v = parseInt(e.target.value);
-                      save({ ...state, targets: { ...state.targets, [f.key]: v || (f.key === "age" ? null : state.targets[f.key]) } });
+                  <input type="number" inputMode="numeric" placeholder={f.ph}
+                    value={targetsDraft[f.key] ?? (state.targets[f.key] ?? "")}
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      setTargetsDraft((d) => ({ ...d, [f.key]: raw }));
+                      if (raw === "") {
+                        // Only age is optional; blank kcal/protein keeps the last value.
+                        if (f.key === "age") save({ ...state, targets: { ...state.targets, age: null } });
+                        return;
+                      }
+                      const v = parseInt(raw);
+                      if (!isNaN(v)) save({ ...state, targets: { ...state.targets, [f.key]: v } });
                     }}
                     className="w-full px-3 py-3 rounded-xl text-sm outline-none text-center"
                     style={{ background: C.deep, border: `1px solid ${C.line}`, color: C.foam }} />
