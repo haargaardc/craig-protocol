@@ -203,6 +203,7 @@ const DEFAULT_STATE = {
   roadWorkout: null, // {date, name, format, exercises:[{name,dose,cue}]}
   health: null,      // {updated, days:[{date, steps, sleepHrs, rhr, weightKg, activeKcal}]}
   blood: [],         // [{id, date, markers:[{name,value,unit,flag}], summary}]
+  bloodDraft: "",    // transcribed lab text, page by page, awaiting review + save
 };
 
 // resize + compress an image file -> dataURL
@@ -292,7 +293,8 @@ export default function App() {
   const healthRef = useRef(null);
   const bloodRef = useRef(null);
   const chatEndRef = useRef(null);
-  const [bloodLoading, setBloodLoading] = useState(false);
+  const [bloodScanning, setBloodScanning] = useState(false);
+  const [bloodSaving, setBloodSaving] = useState(false);
   const [bloodIdx, setBloodIdx] = useState(null); // null = show newest report
   const [showAllMarkers, setShowAllMarkers] = useState(false);
   const [healthMsg, setHealthMsg] = useState(null);
@@ -521,33 +523,60 @@ export default function App() {
     if (healthRef.current) healthRef.current.value = "";
   };
 
-  // Photograph blood work -> extract markers via Claude.
-  // Accepts several images at once: lab results usually span multiple pages,
-  // and they must land in ONE report rather than one report per page.
-  const analyzeBlood = async (fileList) => {
-    const files = Array.from(fileList).slice(0, 8); // 8 pages is plenty; keeps the request sane
+  const draftPageCount = (txt) => ((txt || "").match(/^--- Page /gm) || []).length;
+
+  // Step 1 — transcribe each photographed page into plain text the user can
+  // read and correct. Deliberately transcription only: no interpretation yet.
+  const scanBloodPages = async (fileList) => {
+    const files = Array.from(fileList).slice(0, 8);
     if (!files.length) return;
-    setBloodLoading(true); setHealthMsg(null);
+    setBloodScanning(true); setHealthMsg(null);
+    let draft = state.bloodDraft || "";
+    let added = 0;
     try {
-      // Resize to ~1568px: small enough for the API's per-image limits, still
-      // sharp enough to read a results table. Always re-encoded as JPEG.
-      const images = [];
       for (const f of files) {
+        // ~1568px: within the API's per-image limits, still sharp enough to
+        // read a results table.
         const dataUrl = await compressImage(f, 1568, 0.85);
-        images.push({
-          type: "image",
-          source: { type: "base64", media_type: "image/jpeg", data: dataUrl.split(",")[1] },
-        });
+        const text = await callClaude([{
+          role: "user",
+          content: [
+            { type: "image", source: { type: "base64", media_type: "image/jpeg", data: dataUrl.split(",")[1] } },
+            { type: "text", text: `Transcribe this blood test / lab result page as plain text. One marker per line, exactly as printed: name, value, unit, and the reference range if shown — e.g. "Hemoglobin: 9.2 mmol/L (ref 8.3-10.5)". Include the sample date if it is visible. Transcribe only: do not interpret, summarise, or add any commentary. If this image contains no lab results, reply with exactly: NO_RESULTS_FOUND` },
+          ],
+        }]);
+        const clean = (text || "").trim();
+        if (!clean || clean === "NO_RESULTS_FOUND") continue;
+        draft += `${draft ? "\n\n" : ""}--- Page ${draftPageCount(draft) + 1} ---\n${clean}`;
+        added++;
       }
-      const multi = files.length > 1
-        ? `There are ${files.length} images. They are pages or parts of the SAME lab report — read every image and merge all markers into one combined list, removing duplicates. `
-        : "";
+      if (!added) {
+        setHealthMsg("No lab results found in that image — try a sharper, straighter photo of the results table.");
+      } else {
+        await save({ ...state, bloodDraft: draft });
+        setHealthMsg(`Read ${added} page${added > 1 ? "s" : ""} — check the text below, then save ✓`);
+      }
+    } catch (e) {
+      console.error(e);
+      // Keep whatever pages did scan before the failure.
+      if (added) await save({ ...state, bloodDraft: draft });
+      setHealthMsg(aiErrorMessage(e, "Couldn't read that page — try a sharper photo."));
+    } finally {
+      setBloodScanning(false);
+      if (bloodRef.current) bloodRef.current.value = "";
+    }
+  };
+
+  // Step 2 — turn the reviewed text into structured markers. Text-only call,
+  // so it's cheap and works off exactly what the user approved on screen.
+  const saveBloodReport = async () => {
+    const draft = (state.bloodDraft || "").trim();
+    if (!draft || bloodSaving) return;
+    setBloodSaving(true); setHealthMsg(null);
+    try {
       const text = await callClaude([{
         role: "user",
-        content: [
-          ...images,
-          { type: "text", text: `Read this blood test / lab result. ${multi}Respond ONLY valid JSON, no markdown: {"date": "YYYY-MM-DD or null if not visible", "markers": [{"name": "marker name", "value": "number as shown", "unit": "unit", "flag": "low"|"normal"|"high"|"unknown"}], "summary": "2-3 plain-language sentences about what stands out and anything relevant for training or nutrition. No diagnosis. End with a note to discuss with their doctor if anything is flagged."} Include every marker you can read, up to 40.` },
-        ],
+        content: `Here is the transcribed text of a blood test / lab report, possibly spanning several pages:\n\n${draft}\n\nRespond ONLY valid JSON, no markdown: {"date": "YYYY-MM-DD or null if not visible", "markers": [{"name": "marker name", "value": "number as shown", "unit": "unit", "flag": "low"|"normal"|"high"|"unknown"}], "summary": "2-3 plain-language sentences about what stands out and anything relevant for training or nutrition. No diagnosis. End with a note to discuss with their doctor if anything is flagged."} Use the reference ranges in the text to set each flag. Merge duplicates across pages. Include every marker, up to 40.`,
       }]);
       const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
       const report = {
@@ -555,18 +584,17 @@ export default function App() {
         date: parsed.date || t,
         markers: parsed.markers || [],
         summary: parsed.summary || "",
-        pages: files.length,
+        pages: draftPageCount(draft) || 1,
       };
-      await save({ ...state, blood: [...state.blood, report].slice(-5) });
+      await save({ ...state, blood: [...state.blood, report].slice(-5), bloodDraft: "" });
       setBloodIdx(null); // snap the viewer back to the newest report
       setShowAllMarkers(false);
-      setHealthMsg(`Blood work added — ${report.markers.length} markers from ${files.length} image${files.length > 1 ? "s" : ""} ✓`);
+      setHealthMsg(`Blood work saved — ${report.markers.length} markers ✓`);
     } catch (e) {
       console.error(e);
-      setHealthMsg(aiErrorMessage(e, "Couldn't read those images — try sharper photos of the results table."));
+      setHealthMsg(aiErrorMessage(e, "Couldn't turn that text into a report — check the text and try again."));
     } finally {
-      setBloodLoading(false);
-      if (bloodRef.current) bloodRef.current.value = "";
+      setBloodSaving(false);
     }
   };
 
@@ -1217,17 +1245,58 @@ export default function App() {
                 </div>
               );
             })()}
-            <input ref={bloodRef} type="file" accept="image/*" multiple className="hidden"
-                   onChange={(e) => e.target.files?.length && analyzeBlood(e.target.files)} />
-            <button onClick={() => bloodRef.current?.click()} disabled={bloodLoading}
-              className="w-full py-3 rounded-xl text-sm font-semibold"
-              style={{ border: `1px solid ${C.sand}`, color: bloodLoading ? C.mist : C.sand }}>
-              {bloodLoading ? "Reading results…" : "📷 Add blood test photos"}
-            </button>
-            <p className="text-[11px] mt-2 leading-relaxed" style={{ color: C.mist }}>
-              Multi-page results? Select <span style={{ color: C.sand }}>all the pages at once</span> (up to 8) — they're read together into one report.
-            </p>
-            <p className="text-[11px] mt-2 leading-relaxed" style={{ color: C.mist }}>Informational only — not medical advice. Always discuss results with your doctor.</p>
+            {/* Scan pages one at a time into reviewable text, then save as a report */}
+            <div className="pt-3" style={{ borderTop: `1px solid ${C.line}` }}>
+              {(() => {
+                const pages = draftPageCount(state.bloodDraft);
+                return (
+                  <>
+                    <div className="text-[10px] tracking-[0.2em] mb-2" style={{ color: C.sand }}>
+                      SCANNED TEXT{pages ? ` · ${pages} PAGE${pages > 1 ? "S" : ""}` : ""}
+                    </div>
+                    {state.bloodDraft ? (
+                      <>
+                        <textarea value={state.bloodDraft} rows={9}
+                          onChange={(e) => save({ ...state, bloodDraft: e.target.value })}
+                          className="w-full px-3 py-2 rounded-xl text-xs outline-none resize-y"
+                          style={{ background: C.deep, border: `1px solid ${C.line}`, color: C.foam, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", lineHeight: 1.6 }} />
+                        <p className="text-[11px] mt-1.5 mb-2 leading-relaxed" style={{ color: C.mist }}>
+                          Check the numbers against your printout — you can edit them here. Add more pages, then save.
+                        </p>
+                      </>
+                    ) : (
+                      <p className="text-xs mb-3 leading-relaxed" style={{ color: C.mist }}>
+                        Photograph your results one page at a time. Each page's text appears here so you can check it before anything is saved.
+                      </p>
+                    )}
+                  </>
+                );
+              })()}
+
+              <input ref={bloodRef} type="file" accept="image/*" multiple className="hidden"
+                     onChange={(e) => e.target.files?.length && scanBloodPages(e.target.files)} />
+              <div className="flex gap-2">
+                <button onClick={() => bloodRef.current?.click()} disabled={bloodScanning || bloodSaving}
+                  className="flex-1 py-3 rounded-xl text-sm font-semibold"
+                  style={{ border: `1px solid ${C.sand}`, color: bloodScanning ? C.mist : C.sand }}>
+                  {bloodScanning ? "Reading page…" : state.bloodDraft ? "📷 Add another page" : "📷 Scan first page"}
+                </button>
+                {state.bloodDraft && (
+                  <button onClick={() => save({ ...state, bloodDraft: "" })} disabled={bloodScanning || bloodSaving}
+                    className="px-4 rounded-xl text-sm" style={{ color: C.mist, border: `1px solid ${C.line}` }}>Clear</button>
+                )}
+              </div>
+
+              {state.bloodDraft && (
+                <button onClick={saveBloodReport} disabled={bloodSaving || bloodScanning}
+                  className="w-full mt-2 py-3 rounded-xl text-sm font-semibold"
+                  style={{ background: bloodSaving ? C.line : C.sand, color: bloodSaving ? C.mist : C.deep }}>
+                  {bloodSaving ? "Saving…" : "✓ Save as report"}
+                </button>
+              )}
+            </div>
+
+            <p className="text-[11px] mt-3 leading-relaxed" style={{ color: C.mist }}>Informational only — not medical advice. Always discuss results with your doctor.</p>
           </section>
 
           {healthMsg && <p className="text-sm text-center" style={{ color: healthMsg.includes("✓") ? C.sea : C.alert }}>{healthMsg}</p>}
