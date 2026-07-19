@@ -279,6 +279,39 @@ const aiErrorMessage = (e, fallback) =>
     ? e.message
     : fallback;
 
+// Browser speech-to-text (iOS Safari via webkitSpeechRecognition). One shared
+// instance drives every mic button; `supported` is false where it's missing,
+// so those buttons simply don't render.
+function useDictation() {
+  const [listening, setListening] = useState(false);
+  const recRef = useRef(null);
+  const cbRef = useRef(null);
+  const supported =
+    typeof window !== "undefined" && !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  const start = (onFinal) => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return;
+    try { recRef.current?.stop(); } catch {}
+    const rec = new SR();
+    rec.lang = (typeof navigator !== "undefined" && navigator.language) || "en-US";
+    rec.interimResults = false;
+    rec.continuous = false;
+    rec.maxAlternatives = 1;
+    cbRef.current = onFinal;
+    rec.onresult = (e) => {
+      const txt = Array.from(e.results).map((r) => r[0].transcript).join(" ").trim();
+      if (txt && cbRef.current) cbRef.current(txt);
+    };
+    rec.onend = () => setListening(false);
+    rec.onerror = () => setListening(false);
+    recRef.current = rec;
+    setListening(true);
+    try { rec.start(); } catch { setListening(false); }
+  };
+  const stop = () => { try { recRef.current?.stop(); } catch {} setListening(false); };
+  return { supported, listening, start, stop };
+}
+
 export default function App() {
   const [state, setState] = useState(null);
   const [targetPhoto, setTargetPhoto] = useState(null);
@@ -312,9 +345,13 @@ export default function App() {
   const [showAllMarkers, setShowAllMarkers] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(null); // report id awaiting a 2nd tap
   const [healthMsg, setHealthMsg] = useState(null);
+  const [mealText, setMealText] = useState("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [waistOpen, setWaistOpen] = useState(false);
+  const mic = useDictation();
   const touchRef = useRef(null);
 
-  const TAB_ORDER = ["today", "fuel", "coach", "me", "plan"];
+  const TAB_ORDER = ["today", "fuel", "me", "target"];
   const onTouchStart = (e) => {
     touchRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
   };
@@ -449,6 +486,34 @@ export default function App() {
     }
   };
 
+  // Log a meal from a typed/spoken description instead of a photo.
+  const logMealText = async () => {
+    const desc = mealText.trim();
+    if (!desc || analyzing) return;
+    setError(null); setAnalyzing(true);
+    try {
+      const text = await callClaude([{
+        role: "user",
+        content: `Estimate this meal for a food log from the user's own description: "${desc}". The user is a ~80kg ex-CrossFit dad cutting body fat toward a lean athletic beach physique.${profileContext()} So far today (before this meal): ${kcal} of ${state.targets.kcal} kcal, ${protein} of ${state.targets.protein}g protein.${healthContext()}${bloodContext()}\n\n${EURO_GROUNDING}\n\nIf portions are vague, assume a typical portion and say so briefly. Respond with ONLY valid JSON, no markdown: {"desc": "short meal name, max 5 words", "items": ["item (portion)"], "kcal": number, "protein": number, "comment": "2-3 sentences in a warm coach voice relative to the goal and the day so far. When you give a health reason, name the European reference. Never shame; notice and nudge. Max 55 words."}`,
+      }]);
+      const parsed = parseJson(text);
+      const entry = {
+        id: Date.now(),
+        time: new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }),
+        desc: parsed.desc, items: parsed.items || [],
+        kcal: Math.round(parsed.kcal || 0), protein: Math.round(parsed.protein || 0),
+        comment: parsed.comment || "",
+      };
+      save({ ...state, food: { ...state.food, [t]: [...foodToday, entry] } });
+      setMealText("");
+    } catch (e) {
+      console.error(e);
+      setError(aiErrorMessage(e, "Couldn't estimate that meal — add a little more detail and try again."));
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
   const removeFood = (id) => save({ ...state, food: { ...state.food, [t]: foodToday.filter((f) => f.id !== id) } });
 
   const addWaist = () => {
@@ -456,6 +521,7 @@ export default function App() {
     if (!cm || cm < 50 || cm > 200) return;
     save({ ...state, waist: [...state.waist.filter((w) => w.date !== t), { date: t, cm }] });
     setWaistInput("");
+    setWaistOpen(false); // collapse back to the "next check due" summary
   };
 
   const exportBackup = () => {
@@ -785,7 +851,48 @@ export default function App() {
       }}>{label}</button>
   );
 
+  // A mic button that dictates into whatever setter you pass. Renders nothing
+  // on devices without speech recognition (the keyboard's own mic still works).
+  const micBtn = (append) =>
+    mic.supported ? (
+      <button type="button" aria-label="Dictate"
+        onClick={() => (mic.listening ? mic.stop() : mic.start((txt) => append((v) => (v ? v + " " : "") + txt)))}
+        className="px-3 rounded-xl text-sm shrink-0"
+        style={{
+          background: mic.listening ? C.alert : C.deep,
+          color: mic.listening ? C.deep : C.mist,
+          border: `1px solid ${mic.listening ? C.alert : C.line}`,
+        }}>
+        {mic.listening ? "●" : "🎤"}
+      </button>
+    ) : null;
+
   const latest = progressPhotos[progressPhotos.length - 1];
+
+  // Reusable AI-connection panel (used inside the Settings sheet).
+  const aiConnectionSection = (
+    <section className="rounded-2xl p-5" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
+      <h3 className="text-xl mb-2" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700 }}>AI CONNECTION</h3>
+      <p className="text-xs mb-3" style={{ color: C.mist }}>
+        The coach, meal analysis and blood-work reading use Claude. Paste your Anthropic API key — it is stored only on this device and sent straight to Anthropic from your phone. It never touches any other server.
+      </p>
+      <div className="flex gap-2">
+        <input type="password" inputMode="text" autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false}
+          placeholder={apiKey ? "•••••••• saved ••••••••" : "sk-ant-..."}
+          value={apiKeyInput} onChange={(e) => setApiKeyInput(e.target.value)}
+          className="flex-1 px-4 py-3 rounded-xl text-sm outline-none"
+          style={{ background: C.deep, border: `1px solid ${C.line}`, color: C.foam }} />
+        <button onClick={saveApiKey} className="px-5 rounded-xl text-sm font-semibold" style={{ background: C.sea, color: C.deep }}>Save</button>
+      </div>
+      <div className="flex items-center justify-between mt-2">
+        <span className="text-xs" style={{ color: apiKey ? C.sea : C.mist }}>{apiKey ? "Key saved ✓" : "No key set"}</span>
+        {apiKey && <button onClick={clearApiKey} className="text-xs" style={{ color: C.mist }}>Remove key</button>}
+      </div>
+      <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer"
+         className="inline-block mt-3 text-xs tracking-[0.15em] px-3 py-2 rounded-lg"
+         style={{ border: `1px solid ${C.sea}`, color: C.sea, fontWeight: 600 }}>GET AN API KEY ↗</a>
+    </section>
+  );
 
   return (
     <div className="min-h-screen pb-10" style={{ background: C.deep, color: C.foam, fontFamily: "Inter, sans-serif" }}
@@ -800,9 +907,14 @@ export default function App() {
               CRAIG <span style={{ color: C.sea }}>PROTOCOL</span>
             </h1>
           </div>
-          <div className="text-right">
-            <div className="text-3xl leading-none" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700, color: C.sea }}>{streak}</div>
-            <div className="text-[10px] tracking-[0.25em]" style={{ color: C.mist }}>DAY STREAK</div>
+          <div className="flex items-center gap-4">
+            <div className="text-right">
+              <div className="text-3xl leading-none" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700, color: C.sea }}>{streak}</div>
+              <div className="text-[10px] tracking-[0.25em]" style={{ color: C.mist }}>DAY STREAK</div>
+            </div>
+            <button onClick={() => setSettingsOpen(true)} aria-label="Settings"
+              className="w-9 h-9 rounded-full flex items-center justify-center text-lg leading-none"
+              style={{ border: `1px solid ${C.line}`, color: C.mist }}>⚙</button>
           </div>
         </div>
       </header>
@@ -810,9 +922,8 @@ export default function App() {
       <nav className="flex gap-1 px-3 py-3">
         <TabBtn id="today" label="TODAY" />
         <TabBtn id="fuel" label="FUEL" />
-        <TabBtn id="coach" label="COACH" />
         <TabBtn id="me" label="ME" />
-        <TabBtn id="plan" label="PLAN" />
+        <TabBtn id="target" label="TARGET" />
       </nav>
 
       {storageError && (
@@ -905,6 +1016,61 @@ export default function App() {
               )}
             </section>
           )}
+
+          {/* Coach — lives on Today because most of it is about the session */}
+          <section className="rounded-2xl p-4" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
+            <h3 className="text-lg mb-2" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700 }}>COACH</h3>
+            <div className="overflow-y-auto space-y-3" style={{ maxHeight: 340 }}>
+              {state.chat.length === 0 && (
+                <p className="text-sm py-2 leading-relaxed" style={{ color: C.mist }}>
+                  Ask about today's session, recovery or food. Try: "I only slept 5 hours, adjust today" · "sore left shoulder" · "how's my week going?"
+                </p>
+              )}
+              {state.chat.map((m, i) => (
+                <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+                  <div className="max-w-[85%] px-4 py-3 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap"
+                    style={m.role === "user"
+                      ? { background: C.sea, color: C.deep, borderBottomRightRadius: 4 }
+                      : { background: C.deep, border: `1px solid ${C.line}`, borderBottomLeftRadius: 4 }}>
+                    {m.text}
+                  </div>
+                </div>
+              ))}
+              {coachTyping && (
+                <div className="flex justify-start">
+                  <div className="px-4 py-3 rounded-2xl text-sm" style={{ background: C.deep, border: `1px solid ${C.line}`, color: C.mist }}>Coach is thinking…</div>
+                </div>
+              )}
+              <div ref={chatEndRef} />
+            </div>
+            <div className="flex gap-2 pt-2 mt-2" style={{ borderTop: `1px solid ${C.line}` }}>
+              {micBtn(setChatInput)}
+              <input value={chatInput} onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && sendChat()}
+                placeholder="Talk to your coach…"
+                className="flex-1 min-w-0 px-4 py-3 rounded-xl text-sm outline-none"
+                style={{ background: C.deep, border: `1px solid ${C.line}`, color: C.foam }} />
+              <button onClick={sendChat} disabled={coachTyping}
+                className="px-5 rounded-xl text-sm font-semibold shrink-0"
+                style={{ background: coachTyping ? C.line : C.sea, color: coachTyping ? C.mist : C.deep }}>Send</button>
+            </div>
+          </section>
+
+          {/* The rotation — reference, so it sits at the bottom */}
+          <section className="rounded-2xl p-5" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
+            <h3 className="text-xl mb-3" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700 }}>THE ROTATION</h3>
+            {CYCLE.map((k) => (
+              <div key={k} className="flex items-center gap-3 py-2" style={{ borderTop: `1px solid ${C.line}` }}>
+                <span className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold"
+                  style={{ background: DAYS[k].color, color: C.deep, outline: k === nextDayKey && !doneToday ? `2px solid ${C.foam}` : "none", outlineOffset: 2 }}>{k}</span>
+                <div>
+                  <div className="text-sm font-semibold">{DAYS[k].name}{k === nextDayKey && !doneToday ? " · today" : ""}</div>
+                  <div className="text-xs" style={{ color: C.mist }}>{DAYS[k].sub}</div>
+                </div>
+              </div>
+            ))}
+            <p className="text-xs mt-3" style={{ color: C.mist }}>A → B → C → repeat. Rest days whenever family life demands — the cycle just continues.</p>
+          </section>
         </main>
       )}
 
@@ -950,6 +1116,27 @@ export default function App() {
             style={{ background: analyzing ? C.line : C.sea, color: analyzing ? C.mist : C.deep, fontFamily: "'Barlow Condensed'", fontWeight: 700 }}>
             {analyzing ? "ANALYZING PLATE…" : "📷 SNAP YOUR MEAL"}
           </button>
+
+          {/* Forgot the photo? Type or talk in the meal instead */}
+          <section className="rounded-2xl p-4" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
+            <div className="text-[10px] tracking-[0.2em] mb-2" style={{ color: C.sea }}>OR DESCRIBE IT</div>
+            <textarea value={mealText} onChange={(e) => setMealText(e.target.value)} rows={2}
+              placeholder={'e.g. "two eggs, rye bread, skyr with berries"'}
+              className="w-full px-3 py-2 rounded-xl text-sm outline-none resize-none"
+              style={{ background: C.deep, border: `1px solid ${C.line}`, color: C.foam }} />
+            <div className="flex gap-2 mt-2">
+              {micBtn(setMealText)}
+              <button onClick={logMealText} disabled={analyzing || !mealText.trim()}
+                className="flex-1 min-w-0 py-3 rounded-xl text-sm font-semibold"
+                style={{ background: analyzing || !mealText.trim() ? C.line : C.sand, color: analyzing || !mealText.trim() ? C.mist : C.deep }}>
+                {analyzing ? "Estimating…" : "Log meal"}
+              </button>
+            </div>
+            <p className="text-[11px] mt-2 leading-relaxed" style={{ color: C.mist }}>
+              Forgot to snap a photo? Type it{mic.supported ? ", or tap 🎤 and say it," : ""} and the coach estimates calories & protein.
+            </p>
+          </section>
+
           {error && tab === "fuel" && <p className="text-sm px-2" style={{ color: C.alert }}>{error}</p>}
 
           <div className="space-y-3">
@@ -1042,46 +1229,6 @@ export default function App() {
               </section>
             );
           })()}
-        </main>
-      )}
-
-      {/* ---------- COACH ---------- */}
-      {tab === "coach" && (
-        <main className="px-4 flex flex-col" style={{ height: "calc(100vh - 180px)" }}>
-          <div className="flex-1 overflow-y-auto space-y-3 pb-3">
-            {state.chat.length === 0 && (
-              <div className="text-sm text-center py-8 px-6 leading-relaxed" style={{ color: C.mist }}>
-                Your coach sees your streak, food log and waist trend.<br /><br />
-                Try: "How is my week going?" · "I only slept 5 hours, adjust today" · "Dinner was pizza, what now?"
-              </div>
-            )}
-            {state.chat.map((m, i) => (
-              <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
-                <div className="max-w-[85%] px-4 py-3 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap"
-                  style={m.role === "user"
-                    ? { background: C.sea, color: C.deep, borderBottomRightRadius: 4 }
-                    : { background: C.panel, border: `1px solid ${C.line}`, borderBottomLeftRadius: 4 }}>
-                  {m.text}
-                </div>
-              </div>
-            ))}
-            {coachTyping && (
-              <div className="flex justify-start">
-                <div className="px-4 py-3 rounded-2xl text-sm" style={{ background: C.panel, border: `1px solid ${C.line}`, color: C.mist }}>Coach is thinking…</div>
-              </div>
-            )}
-            <div ref={chatEndRef} />
-          </div>
-          <div className="flex gap-2 pt-2" style={{ borderTop: `1px solid ${C.line}` }}>
-            <input value={chatInput} onChange={(e) => setChatInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && sendChat()}
-              placeholder="Talk to your coach…"
-              className="flex-1 px-4 py-3 rounded-xl text-sm outline-none"
-              style={{ background: C.panel, border: `1px solid ${C.line}`, color: C.foam }} />
-            <button onClick={sendChat} disabled={coachTyping}
-              className="px-5 rounded-xl text-sm font-semibold"
-              style={{ background: coachTyping ? C.line : C.sea, color: coachTyping ? C.mist : C.deep }}>Send</button>
-          </div>
         </main>
       )}
 
@@ -1207,9 +1354,14 @@ export default function App() {
                       {isLatest ? "Latest" : "Viewing"}: {b.date} · {b.markers.length} markers{b.pages > 1 ? ` · ${b.pages} pages` : ""}
                     </div>
                     {confirmDelete === b.id ? (
-                      <button onClick={() => deleteBloodReport(b.id)}
-                        className="text-xs px-2.5 py-1 rounded-lg whitespace-nowrap"
-                        style={{ background: C.alert, color: C.deep, fontWeight: 600 }}>Tap again to delete</button>
+                      <div className="flex gap-2 shrink-0">
+                        <button onClick={() => deleteBloodReport(b.id)}
+                          className="text-xs px-2.5 py-1 rounded-lg whitespace-nowrap"
+                          style={{ background: C.alert, color: C.deep, fontWeight: 600 }}>Delete</button>
+                        <button onClick={() => setConfirmDelete(null)}
+                          className="text-xs px-2.5 py-1 rounded-lg whitespace-nowrap"
+                          style={{ color: C.mist, border: `1px solid ${C.line}` }}>Cancel</button>
+                      </div>
                     ) : (
                       <button onClick={() => setConfirmDelete(b.id)}
                         className="text-xs px-2.5 py-1 rounded-lg whitespace-nowrap"
@@ -1332,45 +1484,9 @@ export default function App() {
         </main>
       )}
 
-      {/* ---------- PLAN ---------- */}
-      {tab === "plan" && (
+      {/* ---------- TARGET ---------- */}
+      {tab === "target" && (
         <main className="px-4 space-y-4">
-          <section className="rounded-2xl p-5" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
-            <h3 className="text-xl mb-3" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700 }}>THE ROTATION</h3>
-            {CYCLE.map((k) => (
-              <div key={k} className="flex items-center gap-3 py-2" style={{ borderTop: `1px solid ${C.line}` }}>
-                <span className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold" style={{ background: DAYS[k].color, color: C.deep }}>{k}</span>
-                <div>
-                  <div className="text-sm font-semibold">{DAYS[k].name}</div>
-                  <div className="text-xs" style={{ color: C.mist }}>{DAYS[k].sub}</div>
-                </div>
-              </div>
-            ))}
-            <p className="text-xs mt-3" style={{ color: C.mist }}>A → B → C → repeat. Rest days whenever family life demands — the cycle just continues.</p>
-          </section>
-
-          <section className="rounded-2xl p-5" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
-            <h3 className="text-xl mb-2" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700 }}>AI CONNECTION</h3>
-            <p className="text-xs mb-3" style={{ color: C.mist }}>
-              The coach, meal-photo analysis and blood-work reading use Claude. Paste your Anthropic API key — it is stored only on this device and sent straight to Anthropic from your phone. It never touches any other server.
-            </p>
-            <div className="flex gap-2">
-              <input type="password" inputMode="text" autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false}
-                placeholder={apiKey ? "•••••••• saved ••••••••" : "sk-ant-..."}
-                value={apiKeyInput} onChange={(e) => setApiKeyInput(e.target.value)}
-                className="flex-1 px-4 py-3 rounded-xl text-sm outline-none"
-                style={{ background: C.deep, border: `1px solid ${C.line}`, color: C.foam }} />
-              <button onClick={saveApiKey} className="px-5 rounded-xl text-sm font-semibold" style={{ background: C.sea, color: C.deep }}>Save</button>
-            </div>
-            <div className="flex items-center justify-between mt-2">
-              <span className="text-xs" style={{ color: apiKey ? C.sea : C.mist }}>{apiKey ? "Key saved ✓" : "No key set"}</span>
-              {apiKey && <button onClick={clearApiKey} className="text-xs" style={{ color: C.mist }}>Remove key</button>}
-            </div>
-            <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer"
-               className="inline-block mt-3 text-xs tracking-[0.15em] px-3 py-2 rounded-lg"
-               style={{ border: `1px solid ${C.sea}`, color: C.sea, fontWeight: 600 }}>GET AN API KEY ↗</a>
-          </section>
-
           <section className="rounded-2xl p-5" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
             <h3 className="text-xl mb-2" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700 }}>PROFILE &amp; TARGETS</h3>
             <p className="text-xs mb-3" style={{ color: C.mist }}>Age sharpens the nutrition advice (recommendations shift with age in NNR2023/EFSA). Targets feed every coach comment.</p>
@@ -1403,24 +1519,37 @@ export default function App() {
           </section>
 
           <section className="rounded-2xl p-5" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
-            <h3 className="text-xl mb-2" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700 }}>FUEL RULES</h3>
-            <ul className="text-sm space-y-2">
-              <li><span style={{ color: C.sea }}>①</span> Protein anchor at every meal — eggs, skyr, chicken, fish.</li>
-              <li><span style={{ color: C.sea }}>②</span> Eat what the family eats: half the carbs, double the veg.</li>
-              <li><span style={{ color: C.sea }}>③</span> Kitchen closes after the kids' bedtime. Non-negotiable.</li>
-              <li><span style={{ color: C.sea }}>④</span> Slightly hungry is the target feeling. Miserable means eat more.</li>
-            </ul>
-          </section>
-
-          <section className="rounded-2xl p-5" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
             <h3 className="text-xl mb-2" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700 }}>WAIST CHECK <span className="text-sm" style={{ color: C.mist, fontFamily: "Inter", fontWeight: 400 }}>(weekly)</span></h3>
-            <div className="flex gap-2">
-              <input type="number" inputMode="decimal" placeholder="cm at navel" value={waistInput}
-                     onChange={(e) => setWaistInput(e.target.value)}
-                     className="flex-1 px-4 py-3 rounded-xl text-sm outline-none"
-                     style={{ background: C.deep, border: `1px solid ${C.line}`, color: C.foam }} />
-              <button onClick={addWaist} className="px-5 rounded-xl text-sm font-semibold" style={{ background: C.sand, color: C.deep }}>Log</button>
-            </div>
+            {(() => {
+              const sorted = [...state.waist].sort((a, b) => a.date.localeCompare(b.date));
+              const last = sorted[sorted.length - 1];
+              const daysSince = last ? Math.floor((Date.parse(t) - Date.parse(last.date)) / 86400000) : Infinity;
+              const due = daysSince >= 7;
+              const nextDue = last ? new Date(Date.parse(last.date) + 7 * 86400000).toISOString().slice(0, 10) : t;
+              const showInput = due || waistOpen;
+              return showInput ? (
+                <>
+                  {!due && (
+                    <p className="text-xs mb-2" style={{ color: C.mist }}>Logging early — that's fine. Same spot at the navel, morning, relaxed.</p>
+                  )}
+                  <div className="flex gap-2">
+                    <input type="number" inputMode="decimal" placeholder="cm at navel" value={waistInput}
+                           onChange={(e) => setWaistInput(e.target.value)}
+                           className="flex-1 px-4 py-3 rounded-xl text-sm outline-none"
+                           style={{ background: C.deep, border: `1px solid ${C.line}`, color: C.foam }} />
+                    <button onClick={addWaist} className="px-5 rounded-xl text-sm font-semibold" style={{ background: C.sand, color: C.deep }}>Log</button>
+                  </div>
+                </>
+              ) : (
+                <div className="flex items-center justify-between px-3 py-3 rounded-xl" style={{ background: C.deep, border: `1px solid ${C.line}` }}>
+                  <div>
+                    <div className="text-sm" style={{ color: C.sea, fontWeight: 600 }}>Logged {last.cm} cm ✓</div>
+                    <div className="text-xs" style={{ color: C.mist }}>Next check due {fmtDay(nextDue)}</div>
+                  </div>
+                  <button onClick={() => setWaistOpen(true)} className="text-xs px-3 py-2 rounded-lg" style={{ border: `1px solid ${C.line}`, color: C.mist }}>Log again</button>
+                </div>
+              );
+            })()}
             {state.waist.length > 0 && (
               <div className="mt-3 space-y-1">
                 {[...state.waist].slice(-6).reverse().map((w) => (
@@ -1432,27 +1561,53 @@ export default function App() {
               </div>
             )}
           </section>
-
-          <section className="rounded-2xl p-5" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
-            <h3 className="text-xl mb-2" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700 }}>BACKUP &amp; RESTORE</h3>
-            <p className="text-xs mb-3" style={{ color: C.mist }}>Export before updating to a new version of the app, then import here to bring everything back — workouts, food, photos, chat.</p>
-            <div className="flex gap-2">
-              <button onClick={exportBackup} className="flex-1 py-3 rounded-xl text-sm font-semibold" style={{ background: C.sea, color: C.deep }}>⬇ Export data</button>
-              <button onClick={() => backupRef.current?.click()} className="flex-1 py-3 rounded-xl text-sm font-semibold" style={{ border: `1px solid ${C.sea}`, color: C.sea }}>⬆ Import backup</button>
-            </div>
-            <input ref={backupRef} type="file" accept="application/json,.json" className="hidden"
-                   onChange={(e) => e.target.files?.[0] && importBackup(e.target.files[0])} />
-            {error && tab === "plan" && <p className="text-xs mt-2" style={{ color: C.alert }}>{error}</p>}
-          </section>
-
-          <section className="rounded-2xl p-5" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
-            <h3 className="text-xl mb-1" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700 }}>TOTALS</h3>
-            <div className="flex gap-6 text-sm">
-              <div><span className="text-2xl" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700, color: C.sea }}>{state.completed.length}</span> <span style={{ color: C.mist }}>workouts</span></div>
-              <div><span className="text-2xl" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700, color: C.sand }}>{Object.keys(state.food).length}</span> <span style={{ color: C.mist }}>days logged</span></div>
-            </div>
-          </section>
         </main>
+      )}
+
+      {/* ---------- SETTINGS SHEET ---------- */}
+      {settingsOpen && (
+        <div className="fixed inset-0 z-50 overflow-y-auto" style={{ background: C.deep }}>
+          <div className="px-4 pb-10 space-y-4" style={{ maxWidth: 640, margin: "0 auto", paddingTop: "calc(env(safe-area-inset-top) + 12px)" }}>
+            <div className="flex items-center justify-between py-1">
+              <h2 className="text-2xl" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700 }}>SETTINGS</h2>
+              <button onClick={() => setSettingsOpen(false)} className="px-4 py-2 rounded-xl text-sm font-semibold" style={{ background: C.sea, color: C.deep }}>Done</button>
+            </div>
+
+            {aiConnectionSection}
+
+            <section className="rounded-2xl p-5" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
+              <h3 className="text-xl mb-2" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700 }}>BACKUP &amp; RESTORE</h3>
+              <p className="text-xs mb-3" style={{ color: C.mist }}>Export before updating to a new version of the app, then import here to bring everything back — workouts, food, photos, chat.</p>
+              <div className="flex gap-2">
+                <button onClick={exportBackup} className="flex-1 py-3 rounded-xl text-sm font-semibold" style={{ background: C.sea, color: C.deep }}>⬇ Export data</button>
+                <button onClick={() => backupRef.current?.click()} className="flex-1 py-3 rounded-xl text-sm font-semibold" style={{ border: `1px solid ${C.sea}`, color: C.sea }}>⬆ Import backup</button>
+              </div>
+              <input ref={backupRef} type="file" accept="application/json,.json" className="hidden"
+                     onChange={(e) => e.target.files?.[0] && importBackup(e.target.files[0])} />
+              {error && <p className="text-xs mt-2" style={{ color: C.alert }}>{error}</p>}
+            </section>
+
+            <section className="rounded-2xl p-5" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
+              <h3 className="text-xl mb-2" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700 }}>FUEL RULES</h3>
+              <ul className="text-sm space-y-2">
+                <li><span style={{ color: C.sea }}>①</span> Protein anchor at every meal — eggs, skyr, chicken, fish.</li>
+                <li><span style={{ color: C.sea }}>②</span> Eat what the family eats: half the carbs, double the veg.</li>
+                <li><span style={{ color: C.sea }}>③</span> Kitchen closes after the kids' bedtime. Non-negotiable.</li>
+                <li><span style={{ color: C.sea }}>④</span> Slightly hungry is the target feeling. Miserable means eat more.</li>
+              </ul>
+            </section>
+
+            <section className="rounded-2xl p-5" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
+              <h3 className="text-xl mb-1" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700 }}>TOTALS</h3>
+              <div className="flex gap-6 text-sm">
+                <div><span className="text-2xl" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700, color: C.sea }}>{state.completed.length}</span> <span style={{ color: C.mist }}>workouts</span></div>
+                <div><span className="text-2xl" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700, color: C.sand }}>{Object.keys(state.food).length}</span> <span style={{ color: C.mist }}>days logged</span></div>
+              </div>
+            </section>
+
+            <p className="text-[11px] text-center" style={{ color: C.mist }}>The Craig Protocol · your data lives only on this device</p>
+          </div>
+        </div>
       )}
     </div>
   );
