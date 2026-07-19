@@ -348,6 +348,7 @@ export default function App() {
   const [mealText, setMealText] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [waistOpen, setWaistOpen] = useState(false);
+  const [showExercises, setShowExercises] = useState(false); // once done, exercises fold away
   const mic = useDictation();
   const touchRef = useRef(null);
 
@@ -447,6 +448,7 @@ export default function App() {
   // ----- actions -----
   const completeWorkout = () => {
     if (doneToday) return;
+    setShowExercises(false); // collapse the list once it's in the bag
     save({ ...state, completed: [...state.completed, { date: t, day: nextDayKey }] });
   };
   const undoWorkout = () => save({ ...state, completed: state.completed.filter((c) => c.date !== t) });
@@ -951,7 +953,15 @@ export default function App() {
             </p>
           </section>
 
-          {(roadToday ? roadToday.exercises : day.exercises).map((ex, i) => (
+          {/* Once done, the exercises fold away under the day header */}
+          {doneToday && (
+            <button onClick={() => setShowExercises(!showExercises)}
+              className="w-full text-sm py-2.5 rounded-xl" style={{ color: C.mist, border: `1px solid ${C.line}` }}>
+              {showExercises ? "▲ Hide exercises" : `▾ Show today's ${(roadToday ? roadToday.name : day.name)} exercises`}
+            </button>
+          )}
+
+          {(!doneToday || showExercises) && (roadToday ? roadToday.exercises : day.exercises).map((ex, i) => (
             <section key={i} className="rounded-2xl overflow-hidden" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
               <button className="w-full flex items-center justify-between px-5 py-4 text-left" onClick={() => setOpenEx(openEx === i ? null : i)}>
                 <div>
