@@ -286,8 +286,13 @@ function useDictation() {
   const [listening, setListening] = useState(false);
   const recRef = useRef(null);
   const cbRef = useRef(null);
+  // iOS home-screen (standalone) web apps expose SpeechRecognition but it never
+  // fires — treat that as unsupported so we fall back to the keyboard's own mic.
+  const iosStandalone = typeof navigator !== "undefined" && navigator.standalone === true;
   const supported =
-    typeof window !== "undefined" && !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+    typeof window !== "undefined" &&
+    !!(window.SpeechRecognition || window.webkitSpeechRecognition) &&
+    !iosStandalone;
   const start = (onFinal) => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) return;
@@ -339,6 +344,7 @@ export default function App() {
   const healthRef = useRef(null);
   const bloodRef = useRef(null);
   const chatEndRef = useRef(null);
+  const coachScrollRef = useRef(null);
   const [bloodScanning, setBloodScanning] = useState(false);
   const [bloodSaving, setBloodSaving] = useState(false);
   const [bloodIdx, setBloodIdx] = useState(null); // null = show newest report
@@ -386,9 +392,11 @@ export default function App() {
     })();
   }, []);
 
+  // Keep the coach box pinned to the newest message (without scrolling the page).
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [state?.chat, coachTyping]);
+    const el = coachScrollRef.current;
+    if (tab === "today" && el) el.scrollTop = el.scrollHeight;
+  }, [tab, state?.chat, coachTyping]);
 
   const save = async (next) => {
     setState(next);
@@ -984,12 +992,14 @@ export default function App() {
             </section>
           ))}
 
-          {!doneToday ? (
+          {!doneToday && (
             <button onClick={completeWorkout} className="w-full py-4 rounded-2xl text-lg tracking-[0.2em]"
               style={{ background: C.sea, color: C.deep, fontFamily: "'Barlow Condensed'", fontWeight: 700 }}>
               MARK COMPLETE
             </button>
-          ) : (
+          )}
+          {/* Undo only appears once the exercises are folded open — keeps the done view clean */}
+          {doneToday && showExercises && (
             <button onClick={undoWorkout} className="w-full py-3 rounded-2xl text-sm" style={{ color: C.mist, border: `1px solid ${C.line}` }}>
               Undo today's workout
             </button>
@@ -1030,7 +1040,7 @@ export default function App() {
           {/* Coach — lives on Today because most of it is about the session */}
           <section className="rounded-2xl p-4" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
             <h3 className="text-lg mb-2" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700 }}>COACH</h3>
-            <div className="overflow-y-auto space-y-3" style={{ maxHeight: 340 }}>
+            <div ref={coachScrollRef} className="overflow-y-auto space-y-3" style={{ maxHeight: 340 }}>
               {state.chat.length === 0 && (
                 <p className="text-sm py-2 leading-relaxed" style={{ color: C.mist }}>
                   Ask about today's session, recovery or food. Try: "I only slept 5 hours, adjust today" · "sore left shoulder" · "how's my week going?"
@@ -1066,21 +1076,6 @@ export default function App() {
             </div>
           </section>
 
-          {/* The rotation — reference, so it sits at the bottom */}
-          <section className="rounded-2xl p-5" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
-            <h3 className="text-xl mb-3" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700 }}>THE ROTATION</h3>
-            {CYCLE.map((k) => (
-              <div key={k} className="flex items-center gap-3 py-2" style={{ borderTop: `1px solid ${C.line}` }}>
-                <span className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold"
-                  style={{ background: DAYS[k].color, color: C.deep, outline: k === nextDayKey && !doneToday ? `2px solid ${C.foam}` : "none", outlineOffset: 2 }}>{k}</span>
-                <div>
-                  <div className="text-sm font-semibold">{DAYS[k].name}{k === nextDayKey && !doneToday ? " · today" : ""}</div>
-                  <div className="text-xs" style={{ color: C.mist }}>{DAYS[k].sub}</div>
-                </div>
-              </div>
-            ))}
-            <p className="text-xs mt-3" style={{ color: C.mist }}>A → B → C → repeat. Rest days whenever family life demands — the cycle just continues.</p>
-          </section>
         </main>
       )}
 
@@ -1143,7 +1138,7 @@ export default function App() {
               </button>
             </div>
             <p className="text-[11px] mt-2 leading-relaxed" style={{ color: C.mist }}>
-              Forgot to snap a photo? Type it{mic.supported ? ", or tap 🎤 and say it," : ""} and the coach estimates calories & protein.
+              Forgot to snap a photo? Type it{mic.supported ? ", or tap 🎤 and say it," : " — or tap the 🎤 on your keyboard to talk,"} and the coach estimates calories & protein.
             </p>
           </section>
 
@@ -1595,6 +1590,20 @@ export default function App() {
               <input ref={backupRef} type="file" accept="application/json,.json" className="hidden"
                      onChange={(e) => e.target.files?.[0] && importBackup(e.target.files[0])} />
               {error && <p className="text-xs mt-2" style={{ color: C.alert }}>{error}</p>}
+            </section>
+
+            <section className="rounded-2xl p-5" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
+              <h3 className="text-xl mb-3" style={{ fontFamily: "'Barlow Condensed'", fontWeight: 700 }}>THE ROTATION</h3>
+              {CYCLE.map((k) => (
+                <div key={k} className="flex items-center gap-3 py-2" style={{ borderTop: `1px solid ${C.line}` }}>
+                  <span className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold" style={{ background: DAYS[k].color, color: C.deep }}>{k}</span>
+                  <div>
+                    <div className="text-sm font-semibold">{DAYS[k].name}</div>
+                    <div className="text-xs" style={{ color: C.mist }}>{DAYS[k].sub}</div>
+                  </div>
+                </div>
+              ))}
+              <p className="text-xs mt-3" style={{ color: C.mist }}>A → B → C → repeat. Rest days whenever family life demands — the cycle just continues.</p>
             </section>
 
             <section className="rounded-2xl p-5" style={{ background: C.panel, border: `1px solid ${C.line}` }}>
