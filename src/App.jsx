@@ -1267,7 +1267,7 @@ export default function App() {
             )}
           </section>
 
-          <input ref={progressRef} type="file" accept="image/*" capture="user" className="hidden"
+          <input ref={progressRef} type="file" accept="image/*" className="hidden"
                  onChange={(e) => e.target.files?.[0] && uploadProgress(e.target.files[0])} />
           <button onClick={() => progressRef.current?.click()}
             className="w-full py-4 rounded-2xl text-lg tracking-[0.2em]"
